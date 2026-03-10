@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+
+{% if kpi.iot_alerts %}
+<div class="alert-banner danger">
+  ⚠ <strong>{{ kpi.iot_alerts }} IoT alert{{ 's' if kpi.iot_alerts > 1 }}</strong> require attention —
+  <a href="{{ url_for('iot') }}" style="color:inherit;font-weight:600;">View IoT Monitoring →</a>
+</div>
+{% endif %}
+
+<!-- KPI row -->
+<div class="kpi-grid">
+  <div class="kpi-card">
+    <div class="kpi-label">Total Orders</div>
+    <div class="kpi-value">{{ kpi.total_orders }}</div>
+    <div class="kpi-sub">Purchase orders</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Active Shipments</div>
+    <div class="kpi-value">{{ kpi.active_shipments }}</div>
+    <div class="kpi-sub">In transit</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Pending QC</div>
+    <div class="kpi-value">{{ kpi.pending_qc }}</div>
+    <div class="kpi-sub">Awaiting inspection</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">IoT Alerts</div>
+    <div class="kpi-value" style="color:{% if kpi.iot_alerts %}var(--danger){% else %}var(--success){% endif %}">
+      {{ kpi.iot_alerts }}
+    </div>
+    <div class="kpi-sub">Anomalies detected</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Approved Suppliers</div>
+    <div class="kpi-value">{{ kpi.approved_suppliers }}</div>
+    <div class="kpi-sub">Active partners</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Certifications</div>
+    <div class="kpi-value">{{ kpi.total_certifications }}</div>
+    <div class="kpi-sub">Issued</div>
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+
+  <!-- Recent Orders -->
+  <div class="card">
+    <div class="card-header">
+      <h3>📦 Recent Purchase Orders</h3>
+      <a href="{{ url_for('orders') }}" class="btn btn-outline">View all</a>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Order ID</th>
+            <th>Supplier</th>
+            <th>Amount</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for o in orders %}
+          <tr>
+            <td><strong>{{ o.id }}</strong></td>
+            <td>{{ o.supplier }}</td>
+            <td>{{ o.currency }} {{ "{:,.0f}".format(o.amount) }}</td>
+            <td><span class="badge status-{{ o.status_class }}">{{ o.status }}</span></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Shipments -->
+  <div class="card">
+    <div class="card-header">
+      <h3>🚢 Shipment Overview</h3>
+      <a href="{{ url_for('shipments') }}" class="btn btn-outline">View all</a>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Shipment</th>
+            <th>Carrier</th>
+            <th>ETA</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for s in shipments %}
+          <tr>
+            <td><strong>{{ s.id }}</strong></td>
+            <td>{{ s.carrier }}</td>
+            <td>{{ s.eta }}</td>
+            <td><span class="badge status-{{ s.status_class }}">{{ s.status }}</span></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- IoT Devices -->
+<div class="card">
+  <div class="card-header">
+    <h3>📡 IoT Device Status</h3>
+    <a href="{{ url_for('iot') }}" class="btn btn-outline">View all</a>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Device ID</th>
+          <th>Type</th>
+          <th>Target</th>
+          <th>Last Value</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for d in iot_devices %}
+        <tr>
+          <td><strong>{{ d.id }}</strong></td>
+          <td>{{ d.type }}</td>
+          <td>{{ d.target }}</td>
+          <td>
+            {% if d.value is not none %}
+              {{ d.value }} {{ d.unit }}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>
+            <span class="badge status-{{ d.status_class }}">
+              {% if d.anomaly %}⚠ Alert{% else %}OK{% endif %}
+            </span>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}

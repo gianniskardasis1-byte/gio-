@@ -1,18 +1,15 @@
 import pygame
 import sys
 import time
+import socket
+import threading
+import json
+import queue
 
-import random
+from server import GameServer, get_local_ip, DEFAULT_PORT
 
 # ──────────────── Settings ────────────────
-SCREEN_WIDTH = 1000
-SCREEN_HEIGHT = 700
-CANVAS_X, CANVAS_Y = 200, 60
-CANVAS_W, CANVAS_H = 780, 520
 FPS = 60
-ROUND_TIME = 60  # seconds per round
-TOTAL_ROUNDS = 6
-
 
 # Colors
 WHITE = (255, 255, 255)
@@ -26,57 +23,95 @@ ACCENT = (80, 140, 255)
 CORRECT_GREEN = (40, 200, 80)
 WRONG_RED = (220, 60, 60)
 
-# Drawing palette
 PALETTE = [
-    (0, 0, 0),        # Black
-    (255, 255, 255),   # White
-    (200, 200, 200),   # Light gray
-    (255, 0, 0),       # Red
-    (255, 100, 0),     # Orange
-    (255, 220, 0),     # Yellow
-    (0, 180, 0),       # Green
-    (0, 200, 200),     # Cyan
-    (0, 80, 255),      # Blue
-    (140, 0, 255),     # Purple
-    (255, 0, 200),     # Pink
-    (140, 80, 20),     # Brown
+    (0, 0, 0), (255, 255, 255), (200, 200, 200),
+    (255, 0, 0), (255, 100, 0), (255, 220, 0),
+    (0, 180, 0), (0, 200, 200), (0, 80, 255),
+    (140, 0, 255), (255, 0, 200), (140, 80, 20),
 ]
-
 BRUSH_SIZES = [3, 6, 10, 18, 30]
 
-# Word list
-WORDS = [
-    "cat", "dog", "house", "tree", "sun", "moon", "car", "fish",
-    "bird", "flower", "star", "heart", "boat", "plane", "apple",
-    "banana", "pizza", "guitar", "camera", "clock", "umbrella",
-    "rainbow", "mountain", "beach", "robot", "rocket", "dragon",
-    "castle", "butterfly", "snowman", "bicycle", "bridge", "diamond",
-    "elephant", "fire", "ghost", "hat", "ice cream", "jungle",
-    "key", "lamp", "mushroom", "ocean", "penguin", "queen",
-    "snake", "tornado", "volcano", "waterfall", "zebra", "sword",
-    "crown", "skull", "cactus", "donut", "egg", "frog", "grapes",
-    "helicopter", "island", "jellyfish", "kite", "lion", "mermaid",
-    "ninja", "octopus", "pirate", "rose", "spider", "treasure",
-    "unicorn", "wizard", "angel", "bomb", "candle", "dice",
-]
+
+# ──────────── Network client ────────────
+class NetClient:
+    def __init__(self):
+        self.sock = None
+        self.connected = False
+        self.incoming = queue.Queue()
+        self._buf = ""
+
+    def connect(self, host, port, name):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.settimeout(5.0)
+        self.sock.connect((host, int(port)))
+        self.sock.settimeout(None)
+        self.connected = True
+        self.send({"type": "join", "name": name})
+        threading.Thread(target=self._recv, daemon=True).start()
+
+    def _recv(self):
+        while self.connected:
+            try:
+                data = self.sock.recv(4096)
+                if not data:
+                    self.connected = False
+                    self.incoming.put({"type": "_dc"})
+                    return
+                self._buf += data.decode()
+                while "\n" in self._buf:
+                    line, self._buf = self._buf.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        try:
+                            self.incoming.put(json.loads(line))
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+            except Exception:
+                self.connected = False
+                self.incoming.put({"type": "_dc"})
+                return
+
+    def send(self, msg):
+        if self.connected and self.sock:
+            try:
+                self.sock.sendall((json.dumps(msg) + "\n").encode())
+            except Exception:
+                self.connected = False
+
+    def poll(self):
+        msgs = []
+        try:
+            while True:
+                msgs.append(self.incoming.get_nowait())
+        except queue.Empty:
+            pass
+        return msgs
+
+    def disconnect(self):
+        self.connected = False
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
 
 
+# ──────────── Main ────────────
 def main():
     pygame.init()
-    # Fullscreen toggle support
-    global SCREEN_WIDTH, SCREEN_HEIGHT, CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H
-    fullscreen = True
+    screen = pygame.display.set_mode((1200, 800))
+    SW, SH = screen.get_size()
+    fullscreen = False
+
     def set_screen(full):
-        global screen, SCREEN_WIDTH, SCREEN_HEIGHT, CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H
+        nonlocal screen, SW, SH
         if full:
             screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
             screen = pygame.display.set_mode((1200, 800))
-        SCREEN_WIDTH, SCREEN_HEIGHT = screen.get_size()
-        CANVAS_X, CANVAS_Y = 200, 60
-        CANVAS_W, CANVAS_H = SCREEN_WIDTH - 220, SCREEN_HEIGHT - 180
-    set_screen(fullscreen)
-    pygame.display.set_caption("Skribbl — Drawing & Guessing Game")
+        SW, SH = screen.get_size()
+
+    pygame.display.set_caption("Skribbl \u2014 Multiplayer Draw & Guess")
     clock = pygame.time.Clock()
 
     # Fonts
@@ -86,869 +121,629 @@ def main():
     font_tiny = pygame.font.SysFont("segoeui", 14)
     font_input = pygame.font.SysFont("consolas", 20)
 
-    # ──────────── Game state ────────────
-    class Game:
-        def __init__(self):
-            self.phase = "menu"  # menu | show_word | drawing | result | game_over
-            self.current_round = 0
-            self.score = 0
-            self.word = ""
-            self.hint = ""
-            self.guess_text = ""
-            self.guess_result = ""  # "" | "correct" | "wrong"
-            self.result_timer = 0
-            self.round_start = 0
-            self.time_left = ROUND_TIME
-            # Canvas
-            self.canvas = pygame.Surface((CANVAS_W, CANVAS_H))
-            self.canvas.fill(WHITE)
-            self.draw_color = BLACK
-            self.brush_size = 6
-            self.drawing = False
-            self.last_pos = None
-            # History for guesses
-            self.guesses = []
-            self.hints_given = 0
-            self.show_word_time = 0
-            self.drawer = "player"  # 'player' or 'ai'
+    # ── helpers ──
+    def draw_rounded_rect(surf, color, rect, r=8):
+        pygame.draw.rect(surf, color, rect, border_radius=r)
 
-        def new_round(self):
-            self.current_round += 1
-            if self.current_round > TOTAL_ROUNDS:
-                self.phase = "game_over"
-                return
-            # 1-3: player draws, 4-6: AI draws
-            if self.current_round <= 3:
-                self.drawer = "player"
-            else:
-                self.drawer = "ai"
-            self.word = random.choice(WORDS)
-            self.hint = "_ " * len(self.word.replace(" ", ""))
-            self.guess_text = ""
-            self.guess_result = ""
-            self.guesses = []
-            self.hints_given = 0
-            self.canvas.fill(WHITE)
-            self.draw_color = BLACK
-            self.brush_size = 6
-            self.drawing = False
-            self.last_pos = None
-            self.phase = "drawing"
-            self.round_start = time.time()
-            self.time_left = ROUND_TIME
-            self.show_word_time = time.time()
-            self.drawing_done = False
-            self.guessing_started = False
-            self.ai_draw_steps = None
-            self.ai_draw_step_idx = 0
-            # Reset AI draw state for new round
-            if hasattr(self, 'ai_drawn'):
-                self.ai_drawn = False
-            if hasattr(self, 'ai_drawn_time'):
-                self.ai_drawn_time = None
+    def draw_button(surf, text, rect, color=ACCENT, tc=WHITE, f=font_med):
+        draw_rounded_rect(surf, color, rect, 10)
+        t = f.render(text, True, tc)
+        surf.blit(t, t.get_rect(center=rect.center))
 
-        def start_guessing(self):
-            self.phase = "guessing"
-            self.guess_text = ""
-            self.guess_result = ""
-            self.guesses = []
-            self.hints_given = 0
-            self.round_start = time.time()
-            self.time_left = ROUND_TIME
+    def draw_text_input(surf, text, rect, active=False, f=font_input):
+        pygame.draw.rect(surf, WHITE, rect, border_radius=6)
+        pygame.draw.rect(surf, ACCENT if active else GRAY, rect, 2, border_radius=6)
+        t = f.render(text + ("\u2502" if active else ""), True, BLACK)
+        surf.blit(t, (rect.x + 8, rect.y + (rect.h - t.get_height()) // 2))
 
-        def build_hint(self):
-            """Reveal some letters as hints."""
-            word_chars = list(self.word)
-            hidden = list(self.hint.replace(" ", ""))
-            # Pick an unrevealed position
-            unrevealed = [i for i, c in enumerate(word_chars) if c != " " and hidden[i] == "_"]
-            if unrevealed:
-                idx = random.choice(unrevealed)
-                hidden[idx] = word_chars[idx]
-                self.hints_given += 1
-            self.hint = " ".join(hidden)
+    # ── state ──
+    net = NetClient()
+    server_inst = None
 
-    g = Game()
+    phase = "menu"       # menu | joining | lobby | playing | round_result | game_over
+    name_text = ""
+    ip_text = ""
+    active_input = "name"
+    error_msg = ""
+    my_id = None
+    is_host = False
 
-    # ──────────────── AI Player State ────────────────
-    class AIPlayer:
-        def __init__(self):
-            self.last_guess_time = 0
-            self.guess_interval = 5.0  # seconds between guesses
-            self.active = True  # Set to True to enable AI guessing
-            self.last_hint = ""
-            self.tried_words = set()
+    # lobby / game
+    players = []         # [{id, name, score}, ...]
+    drawer_id = None
+    drawer_name = ""
+    word = ""            # only set for drawer
+    hint = ""
+    current_round = 0
+    total_rounds = 6
+    time_left = 60
+    guess_text = ""
+    chat_log = []        # [(text, color), ...]
+    guessed_correctly = False
 
-        def make_guess(self, hint):
-            # Try to guess the word from the hint
-            # If hint is all underscores, guess random word
-            clean_hint = hint.replace(" ", "")
-            possible = []
-            for w in WORDS:
-                if len(w.replace(" ", "")) != len(clean_hint):
-                    continue
-                match = True
-                for i, c in enumerate(clean_hint):
-                    if c != "_" and w.replace(" ", "")[i] != c:
-                        match = False
-                        break
-                if match and w not in self.tried_words:
-                    possible.append(w)
-            if possible:
-                guess = random.choice(possible)
-            else:
-                # fallback: random word not tried
-                guess = random.choice([w for w in WORDS if w not in self.tried_words])
-            self.tried_words.add(guess)
-            return guess
+    # canvas
+    LEFT_W = 190
+    RIGHT_W = 210
+    CANVAS_X = LEFT_W + 10
+    CANVAS_Y = 60
+    canvas_w = SW - LEFT_W - RIGHT_W - 20
+    canvas_h = SH - 220
+    canvas = pygame.Surface((canvas_w, canvas_h))
+    canvas.fill(WHITE)
+    draw_color = BLACK
+    brush_size = 6
+    drawing = False
+    last_pos = None
 
-        def reset(self):
-            self.last_guess_time = 0
-            self.tried_words = set()
+    # round result
+    result_word = ""
+    result_reason = ""
+    result_timer = 0
 
-    ai = AIPlayer()
+    def reset_canvas():
+        nonlocal canvas, canvas_w, canvas_h
+        canvas_w = max(200, SW - LEFT_W - RIGHT_W - 20)
+        canvas_h = max(200, SH - 220)
+        canvas = pygame.Surface((canvas_w, canvas_h))
+        canvas.fill(WHITE)
 
-    def draw_rounded_rect(surface, color, rect, radius=8):
-        pygame.draw.rect(surface, color, rect, border_radius=radius)
+    def recalc_layout():
+        nonlocal CANVAS_X, CANVAS_Y, canvas_w, canvas_h
+        CANVAS_X = LEFT_W + 10
+        CANVAS_Y = 60
+        canvas_w = max(200, SW - LEFT_W - RIGHT_W - 20)
+        canvas_h = max(200, SH - 220)
 
-    def draw_button(surface, text, rect, color=ACCENT, text_color=WHITE, f=font_med):
-        draw_rounded_rect(surface, color, rect, 10)
-        txt = f.render(text, True, text_color)
-        surface.blit(txt, txt.get_rect(center=rect.center))
-
-    def point_in_rect(pos, rect):
-        return rect.collidepoint(pos)
-
-    # ──────────────── Main loop ────────────────
+    # ── main loop ──
     running = True
-    # --- Page scroll state ---
-    page_scroll_offset = 0
-    PAGE_SCROLLBAR_W = 18
-    # Set a virtual page height (can be larger than screen)
-    VIRTUAL_PAGE_HEIGHT = max(1200, SCREEN_HEIGHT)
-
     while running:
-        dt = clock.tick(FPS)
+        clock.tick(FPS)
         mx, my = pygame.mouse.get_pos()
+        recalc_layout()
 
-        events = pygame.event.get()
-        for event in events:
-            # Only skip mouse events for drawing and guess history during AI guessing phase
-            if g.phase == "guessing" and g.drawer == "ai":
-                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION, pygame.MOUSEWHEEL):
-                    # Still allow fullscreen and page scrollbar mouse events
-                    # Only skip mouse events that would affect drawing or guess history
-                    # (Drawing and guess history mouse logic is already guarded by flags)
-                    pass  # Do not continue; allow event loop to process keyboard and essential UI
+        # ── process network ──
+        if net.connected:
+            for msg in net.poll():
+                mt = msg.get("type", "")
 
-            # Always allow quit and fullscreen events
+                if mt == "welcome":
+                    my_id = msg["id"]
+                    is_host = msg.get("is_host", False)
+                    players = msg.get("players", [])
+                    phase = "lobby"
+                    error_msg = ""
+
+                elif mt == "you_are_host":
+                    is_host = True
+
+                elif mt == "player_joined":
+                    players.append({"id": msg["id"], "name": msg["name"], "score": 0})
+                    chat_log.append((f"{msg['name']} joined", ACCENT))
+
+                elif mt == "player_left":
+                    players = [p for p in players if p["id"] != msg["id"]]
+                    chat_log.append((f"{msg['name']} left", GRAY))
+
+                elif mt == "new_round":
+                    phase = "playing"
+                    current_round = msg["round"]
+                    total_rounds = msg["total_rounds"]
+                    drawer_id = msg["drawer_id"]
+                    drawer_name = msg["drawer_name"]
+                    word = msg.get("word", "")
+                    hint = msg.get("hint", "")
+                    time_left = msg.get("time", 60)
+                    players = msg.get("players", players)
+                    guess_text = ""
+                    guessed_correctly = False
+                    chat_log = []
+                    reset_canvas()
+                    drawing = False
+                    last_pos = None
+                    draw_color = BLACK
+                    brush_size = 6
+                    if drawer_id == my_id:
+                        chat_log.append((f"Your word: {word.upper()}", ACCENT))
+                    else:
+                        chat_log.append((f"{drawer_name} is drawing!", ACCENT))
+
+                elif mt == "draw_line":
+                    x1 = int(msg["x1"] * canvas_w)
+                    y1 = int(msg["y1"] * canvas_h)
+                    x2 = int(msg["x2"] * canvas_w)
+                    y2 = int(msg["y2"] * canvas_h)
+                    c = tuple(msg["color"])
+                    s = msg["size"]
+                    pygame.draw.line(canvas, c, (x1, y1), (x2, y2), s)
+                    pygame.draw.circle(canvas, c, (x2, y2), s // 2)
+
+                elif mt == "draw_dot":
+                    x = int(msg["x"] * canvas_w)
+                    y = int(msg["y"] * canvas_h)
+                    c = tuple(msg["color"])
+                    s = msg["size"]
+                    pygame.draw.circle(canvas, c, (x, y), s // 2)
+
+                elif mt == "clear_canvas":
+                    canvas.fill(WHITE)
+
+                elif mt == "correct_guess":
+                    pn = msg["player_name"]
+                    chat_log.append(("\u2713 " + pn + " guessed correctly!", CORRECT_GREEN))
+                    if msg["player_id"] == my_id:
+                        guessed_correctly = True
+                    scores = msg.get("scores", {})
+                    for p in players:
+                        sd = scores.get(str(p["id"]))
+                        if sd:
+                            p["score"] = sd["score"]
+
+                elif mt == "wrong_guess":
+                    pn = msg["player_name"]
+                    tx = msg["text"]
+                    if msg["player_id"] == my_id:
+                        chat_log.append(("\u2717 " + tx, WRONG_RED))
+                    else:
+                        chat_log.append(("\u2717 " + pn + ": " + tx, WRONG_RED))
+
+                elif mt == "hint":
+                    hint = msg["hint"]
+
+                elif mt == "timer":
+                    time_left = msg["time_left"]
+
+                elif mt == "round_over":
+                    phase = "round_result"
+                    result_word = msg["word"]
+                    result_reason = msg["reason"]
+                    result_timer = time.time()
+                    scores = msg.get("scores", {})
+                    for p in players:
+                        sd = scores.get(str(p["id"]))
+                        if sd:
+                            p["score"] = sd["score"]
+
+                elif mt == "game_over":
+                    phase = "game_over"
+                    scores = msg.get("scores", {})
+                    for p in players:
+                        sd = scores.get(str(p["id"]))
+                        if sd:
+                            p["score"] = sd["score"]
+
+                elif mt == "back_to_lobby":
+                    phase = "lobby"
+                    chat_log.append((msg.get("reason", "Back to lobby"), GRAY))
+
+                elif mt == "_dc":
+                    phase = "menu"
+                    error_msg = "Disconnected from server"
+                    net.disconnect()
+
+        # ── events ──
+        for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F11:
                     fullscreen = not fullscreen
                     set_screen(fullscreen)
-                elif event.key == pygame.K_ESCAPE and fullscreen:
+                    reset_canvas()
+                    continue
+                if event.key == pygame.K_ESCAPE and fullscreen:
                     fullscreen = False
                     set_screen(fullscreen)
-
-            # Only process game logic if not in game_over phase
-            if g.phase == "game_over":
-                if event.type == pygame.MOUSEBUTTONDOWN:
-                    play_btn = pygame.Rect(SCREEN_WIDTH // 2 - 120, 480, 240, 55)
-                    if point_in_rect(event.pos, play_btn):
-                        g.__init__()
-                        g.new_round()
-                continue
+                    reset_canvas()
+                    continue
 
             # ── MENU ──
-            if g.phase == "menu":
+            if phase == "menu":
                 if event.type == pygame.MOUSEBUTTONDOWN:
-                    play_btn = pygame.Rect(SCREEN_WIDTH // 2 - 120, 400, 240, 55)
-                    if point_in_rect(event.pos, play_btn):
-                        g.__init__()
-                        ai.reset()
-                        g.new_round()
-                continue
+                    name_rect = pygame.Rect(SW // 2 - 150, 280, 300, 40)
+                    if name_rect.collidepoint(event.pos):
+                        active_input = "name"
 
-            # (No more show_word phase)
+                    host_btn = pygame.Rect(SW // 2 - 260, 380, 240, 55)
+                    if host_btn.collidepoint(event.pos) and name_text.strip():
+                        try:
+                            server_inst = GameServer()
+                            threading.Thread(target=server_inst.run, daemon=True).start()
+                            time.sleep(0.4)
+                            net.connect("127.0.0.1", DEFAULT_PORT, name_text.strip())
+                        except Exception as e:
+                            error_msg = str(e)
 
-            # ── DRAWING PHASE ──
-            if g.phase == "drawing":
-                # Drawing phase: only drawer can draw, others wait
-                if g.drawer == "ai":
-                    # Gradual AI drawing: draw a little each frame
-                    if g.ai_draw_steps is None:
-                        g.canvas.fill(WHITE)
-                        g.ai_draw_steps = []
-                        for _ in range(12):
-                            color = random.choice(PALETTE)
-                            x1 = random.randint(0, CANVAS_W)
-                            y1 = random.randint(0, CANVAS_H)
-                            x2 = random.randint(0, CANVAS_W)
-                            y2 = random.randint(0, CANVAS_H)
-                            size = random.choice(BRUSH_SIZES)
-                            g.ai_draw_steps.append(('line', color, x1, y1, x2, y2, size))
-                        for _ in range(4):
-                            color = random.choice(PALETTE)
-                            x = random.randint(0, CANVAS_W-40)
-                            y = random.randint(0, CANVAS_H-40)
-                            w = random.randint(20, 80)
-                            h = random.randint(20, 80)
-                            g.ai_draw_steps.append(('ellipse', color, x, y, w, h))
-                        g.ai_draw_step_idx = 0
-                    if g.ai_draw_step_idx < len(g.ai_draw_steps):
-                        step = g.ai_draw_steps[g.ai_draw_step_idx]
-                        if step[0] == 'line':
-                            _, color, x1, y1, x2, y2, size = step
-                            pygame.draw.line(g.canvas, color, (x1, y1), (x2, y2), size)
-                        elif step[0] == 'ellipse':
-                            _, color, x, y, w, h = step
-                            pygame.draw.ellipse(g.canvas, color, (x, y, w, h), 0)
-                        g.ai_draw_step_idx += 1
-                    else:
-                        g.drawing_done = True
-                else:
-                    # Player drawing (only if drawing_mouse_ui_enabled)
-                    if drawing_mouse_ui_enabled:
-                        if event.type == pygame.MOUSEBUTTONDOWN:
-                            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                                # Check palette clicks
-                                palette_clicked = False
-                                for i, color in enumerate(PALETTE):
-                                    cx = 20 + (i % 2) * 40
-                                    cy = 80 + (i // 2) * 40
-                                    crect = pygame.Rect(cx, cy, 34, 34)
-                                    if point_in_rect(event.pos, crect):
-                                        g.draw_color = color
-                                        palette_clicked = True
-                                        break
-                                # Check brush size clicks
-                                if not palette_clicked:
-                                    for i, size in enumerate(BRUSH_SIZES):
-                                        bx = 20 + i * 34
-                                        by = CANVAS_Y + CANVAS_H + 20
-                                        brect = pygame.Rect(bx, by, 30, 30)
-                                        if point_in_rect(event.pos, brect):
-                                            g.brush_size = size
-                                            palette_clicked = True
-                                            break
-                                # Check clear button
-                                if not palette_clicked:
-                                    clear_btn = pygame.Rect(20, CANVAS_Y + CANVAS_H + 60, 160, 35)
-                                    if point_in_rect(event.pos, clear_btn):
-                                        g.canvas.fill(WHITE)
-                                        palette_clicked = True
-                                # Start drawing on canvas
-                                if not palette_clicked:
-                                    canvas_rect = pygame.Rect(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H)
-                                    if point_in_rect(event.pos, canvas_rect):
-                                        g.drawing = True
-                                        g.last_pos = (mx - CANVAS_X, my - CANVAS_Y)
-                                        pygame.draw.circle(g.canvas, g.draw_color, g.last_pos, g.brush_size // 2)
-                        elif event.type == pygame.MOUSEBUTTONUP:
-                            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                                g.drawing = False
-                                g.last_pos = None
-                        elif event.type == pygame.MOUSEMOTION:
-                            if g.drawing:
-                                canvas_rect = pygame.Rect(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H)
-                                if point_in_rect(event.pos, canvas_rect):
-                                    cur_pos = (mx - CANVAS_X, my - CANVAS_Y)
-                                    if g.last_pos:
-                                        pygame.draw.line(g.canvas, g.draw_color, g.last_pos, cur_pos, g.brush_size)
-                                        pygame.draw.circle(g.canvas, g.draw_color, cur_pos, g.brush_size // 2)
-                                    g.last_pos = cur_pos
-                                else:
-                                    g.last_pos = None
-                    # Drawing done button (player)
-                    if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
-                        g.drawing_done = True
+                    join_btn = pygame.Rect(SW // 2 + 20, 380, 240, 55)
+                    if join_btn.collidepoint(event.pos) and name_text.strip():
+                        phase = "joining"
+                        active_input = "ip"
+                        error_msg = ""
 
-                # When drawing is done, move to guessing phase
-                if g.drawing_done and not g.guessing_started:
-                    g.guessing_started = True
-                    if g.drawer == "ai":
-                        g.phase = "guessing"
-                        g.guess_result = ""
-                        g.guesses = []
-                        g.result_timer = 0
-                    else:
-                        g.start_guessing()
-                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                        # Check palette clicks
-                        palette_clicked = False
-                        for i, color in enumerate(PALETTE):
-                            cx = 20 + (i % 2) * 40
-                            cy = 80 + (i // 2) * 40
-                            crect = pygame.Rect(cx, cy, 34, 34)
-                            if point_in_rect(event.pos, crect):
-                                g.draw_color = color
-                                palette_clicked = True
-                                break
+                elif event.type == pygame.KEYDOWN and active_input == "name":
+                    if event.key == pygame.K_BACKSPACE:
+                        name_text = name_text[:-1]
+                    elif event.key == pygame.K_RETURN and name_text.strip():
+                        active_input = "ip"
+                    elif len(name_text) < 15 and event.unicode.isprintable():
+                        name_text += event.unicode
 
-                        # Check brush size clicks
-                        if not palette_clicked:
-                            for i, size in enumerate(BRUSH_SIZES):
-                                bx = 20 + i * 34
-                                by = CANVAS_Y + CANVAS_H + 20
-                                brect = pygame.Rect(bx, by, 30, 30)
-                                if point_in_rect(event.pos, brect):
-                                    g.brush_size = size
-                                    palette_clicked = True
-                                    break
+            # ── JOINING ──
+            elif phase == "joining":
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    ip_rect = pygame.Rect(SW // 2 - 150, 280, 300, 40)
+                    if ip_rect.collidepoint(event.pos):
+                        active_input = "ip"
 
-                        # Check clear button
-                        if not palette_clicked:
-                            clear_btn = pygame.Rect(20, CANVAS_Y + CANVAS_H + 60, 160, 35)
-                            if point_in_rect(event.pos, clear_btn):
-                                g.canvas.fill(WHITE)
-                                palette_clicked = True
+                    connect_btn = pygame.Rect(SW // 2 - 110, 350, 220, 50)
+                    if connect_btn.collidepoint(event.pos) and ip_text.strip():
+                        try:
+                            net.connect(ip_text.strip(), DEFAULT_PORT, name_text.strip())
+                        except Exception as e:
+                            error_msg = str(e)
 
-                        # Start drawing on canvas
-                        if not palette_clicked:
-                            canvas_rect = pygame.Rect(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H)
-                            if point_in_rect(event.pos, canvas_rect):
-                                g.drawing = True
-                                g.last_pos = (mx - CANVAS_X, my - CANVAS_Y)
-                                pygame.draw.circle(g.canvas, g.draw_color, g.last_pos, g.brush_size // 2)
-
-                elif event.type == pygame.MOUSEBUTTONUP:
-                    if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                        g.drawing = False
-                        g.last_pos = None
-
-                elif event.type == pygame.MOUSEMOTION:
-                    if g.drawing:
-                        canvas_rect = pygame.Rect(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H)
-                        if point_in_rect(event.pos, canvas_rect):
-                            cur_pos = (mx - CANVAS_X, my - CANVAS_Y)
-                            if g.last_pos:
-                                pygame.draw.line(g.canvas, g.draw_color, g.last_pos, cur_pos, g.brush_size)
-                                pygame.draw.circle(g.canvas, g.draw_color, cur_pos, g.brush_size // 2)
-                            g.last_pos = cur_pos
-                        else:
-                            g.last_pos = None
+                    back_btn = pygame.Rect(SW // 2 - 110, 420, 220, 50)
+                    if back_btn.collidepoint(event.pos):
+                        phase = "menu"
+                        error_msg = ""
 
                 elif event.type == pygame.KEYDOWN:
-                    if g.guess_result == "correct":
-                        pass  # ignore input after correct guess
-                    elif event.key == pygame.K_RETURN:
-                        guess = g.guess_text.strip().lower()
-                        if guess:
-                            if guess == g.word.lower():
-                                g.guess_result = "correct"
-                                # Score based on time left
-                                bonus = max(10, int(g.time_left * 2))
-                                g.score += bonus
-                                g.guesses.append(("✓ " + g.guess_text, CORRECT_GREEN))
-                                g.result_timer = time.time()
-                            else:
-                                g.guesses.append(("✗ " + g.guess_text, WRONG_RED))
-                                # Give a hint every 3 wrong guesses
-                                if len([gx for gx in g.guesses if gx[1] == WRONG_RED]) % 3 == 0:
-                                    g.build_hint()
-                            g.guess_text = ""
-                    elif event.key == pygame.K_BACKSPACE:
-                        g.guess_text = g.guess_text[:-1]
-                    elif event.key == pygame.K_ESCAPE:
-                        # Skip round
-                        g.phase = "result"
-                        g.guess_result = "skipped"
-                        g.result_timer = time.time()
-                    else:
-                        if len(g.guess_text) < 25 and event.unicode.isprintable():
-                            g.guess_text += event.unicode
-
-            # ── GUESSING PHASE ──
-            elif g.phase == "guessing":
-                # If AI is the drawer, let it guess immediately and move to result
-                if g.drawer == "ai" and g.guess_result == "":
-                    g.guess_result = "correct"
-                    g.result_timer = time.time()
-                # Only the non-drawer can guess
-                elif g.drawer == "player":
-                    # AI guesses
-                    if ai.active and g.guess_result == "" and (time.time() - ai.last_guess_time > ai.guess_interval):
-                        ai.last_guess_time = time.time()
-                        ai_guess = ai.make_guess(g.hint)
-                        if ai_guess.lower() == g.word.lower():
-                            g.guess_result = "correct"
-                            bonus = max(10, int(g.time_left * 2))
-                            g.score += bonus
-                            g.guesses.append(("AI ✓ " + ai_guess, CORRECT_GREEN))
-                            g.result_timer = time.time()
-                            g.phase = "result"
-                        else:
-                            g.guesses.append(("AI ✗ " + ai_guess, WRONG_RED))
-                            # Give a hint every 3 wrong guesses
-                            if len([gx for gx in g.guesses if gx[1] == WRONG_RED]) % 3 == 0:
-                                g.build_hint()
-                else:
-                    # Player guesses
-                    if event.type == pygame.KEYDOWN:
-                        if g.guess_result == "correct":
-                            pass  # ignore input after correct guess
-                        elif event.key == pygame.K_RETURN:
-                            guess = g.guess_text.strip().lower()
-                            if guess:
-                                if guess == g.word.lower():
-                                    g.guess_result = "correct"
-                                    # Score based on time left
-                                    bonus = max(10, int(g.time_left * 2))
-                                    g.score += bonus
-                                    g.guesses.append(("✓ " + g.guess_text, CORRECT_GREEN))
-                                    g.result_timer = time.time()
-                                else:
-                                    g.guesses.append(("✗ " + g.guess_text, WRONG_RED))
-                                    # Give a hint every 3 wrong guesses
-                                    if len([gx for gx in g.guesses if gx[1] == WRONG_RED]) % 3 == 0:
-                                        g.build_hint()
-                                g.guess_text = ""
-                        elif event.key == pygame.K_BACKSPACE:
-                            g.guess_text = g.guess_text[:-1]
+                    if active_input == "ip":
+                        if event.key == pygame.K_BACKSPACE:
+                            ip_text = ip_text[:-1]
+                        elif event.key == pygame.K_RETURN and ip_text.strip():
+                            try:
+                                net.connect(ip_text.strip(), DEFAULT_PORT, name_text.strip())
+                            except Exception as e:
+                                error_msg = str(e)
                         elif event.key == pygame.K_ESCAPE:
-                            # Skip round
-                            g.phase = "result"
-                            g.guess_result = "skipped"
-                            g.result_timer = time.time()
-                        else:
-                            if len(g.guess_text) < 25 and event.unicode.isprintable():
-                                g.guess_text += event.unicode
+                            phase = "menu"
+                            error_msg = ""
+                        elif len(ip_text) < 45 and event.unicode.isprintable():
+                            ip_text += event.unicode
 
-            # ── RESULT ──
-            elif g.phase == "result":
-                if event.type == pygame.MOUSEBUTTONDOWN or event.type == pygame.KEYDOWN:
-                    if time.time() - g.result_timer > 1.0:
-                        if g.current_round >= TOTAL_ROUNDS:
-                            g.phase = "game_over"
+            # ── LOBBY ──
+            elif phase == "lobby":
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    start_btn = pygame.Rect(SW // 2 - 120, 500, 240, 55)
+                    if start_btn.collidepoint(event.pos) and is_host and len(players) >= 2:
+                        net.send({"type": "start_game"})
+
+            # ── PLAYING ──
+            elif phase == "playing":
+                am_drawer = (drawer_id == my_id)
+
+                if am_drawer:
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        clicked_ui = False
+                        # palette
+                        for i, col in enumerate(PALETTE):
+                            cx = 20 + (i % 2) * 40
+                            cy = 100 + (i // 2) * 40
+                            if pygame.Rect(cx, cy, 34, 34).collidepoint(event.pos):
+                                draw_color = col
+                                clicked_ui = True
+                                break
+                        # brush sizes
+                        if not clicked_ui:
+                            for i, sz in enumerate(BRUSH_SIZES):
+                                bx = 20 + i * 34
+                                by = CANVAS_Y + canvas_h + 20
+                                if pygame.Rect(bx, by, 30, 30).collidepoint(event.pos):
+                                    brush_size = sz
+                                    clicked_ui = True
+                                    break
+                        # clear
+                        if not clicked_ui:
+                            clr_btn = pygame.Rect(20, CANVAS_Y + canvas_h + 60, 160, 35)
+                            if clr_btn.collidepoint(event.pos):
+                                canvas.fill(WHITE)
+                                net.send({"type": "clear_canvas"})
+                                clicked_ui = True
+                        # start draw
+                        if not clicked_ui:
+                            cr = pygame.Rect(CANVAS_X, CANVAS_Y, canvas_w, canvas_h)
+                            if cr.collidepoint(event.pos):
+                                drawing = True
+                                last_pos = (mx - CANVAS_X, my - CANVAS_Y)
+                                pygame.draw.circle(canvas, draw_color, last_pos, brush_size // 2)
+                                net.send({
+                                    "type": "draw_dot",
+                                    "x": last_pos[0] / canvas_w,
+                                    "y": last_pos[1] / canvas_h,
+                                    "color": list(draw_color),
+                                    "size": brush_size,
+                                })
+
+                    elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                        drawing = False
+                        last_pos = None
+
+                    elif event.type == pygame.MOUSEMOTION and drawing:
+                        cr = pygame.Rect(CANVAS_X, CANVAS_Y, canvas_w, canvas_h)
+                        if cr.collidepoint(event.pos):
+                            cur = (mx - CANVAS_X, my - CANVAS_Y)
+                            if last_pos:
+                                pygame.draw.line(canvas, draw_color, last_pos, cur, brush_size)
+                                pygame.draw.circle(canvas, draw_color, cur, brush_size // 2)
+                                net.send({
+                                    "type": "draw_line",
+                                    "x1": last_pos[0] / canvas_w,
+                                    "y1": last_pos[1] / canvas_h,
+                                    "x2": cur[0] / canvas_w,
+                                    "y2": cur[1] / canvas_h,
+                                    "color": list(draw_color),
+                                    "size": brush_size,
+                                })
+                            last_pos = cur
                         else:
-                            g.new_round()
+                            last_pos = None
+
+                # guessing input (not drawer, not already guessed)
+                if not am_drawer and not guessed_correctly:
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_RETURN and guess_text.strip():
+                            net.send({"type": "guess", "text": guess_text.strip()})
+                            guess_text = ""
+                        elif event.key == pygame.K_BACKSPACE:
+                            guess_text = guess_text[:-1]
+                        elif len(guess_text) < 30 and event.unicode.isprintable():
+                            guess_text += event.unicode
 
             # ── GAME OVER ──
-            elif g.phase == "game_over":
+            elif phase == "game_over":
                 if event.type == pygame.MOUSEBUTTONDOWN:
-                    play_btn = pygame.Rect(SCREEN_WIDTH // 2 - 120, 480, 240, 55)
-                    if point_in_rect(event.pos, play_btn):
-                        g.__init__()
-                        g.new_round()
+                    lobby_btn = pygame.Rect(SW // 2 - 120, 520, 240, 55)
+                    if lobby_btn.collidepoint(event.pos):
+                        phase = "lobby"
 
-        # ── Time logic during drawing ──
-        if g.phase == "drawing" and g.guess_result != "correct":
-            g.time_left = max(0, ROUND_TIME - (time.time() - g.round_start))
-            # Auto-hint at certain times
-            if g.time_left < ROUND_TIME * 0.5 and g.hints_given == 0:
-                g.build_hint()
-            if g.time_left < ROUND_TIME * 0.25 and g.hints_given <= 1:
-                g.build_hint()
-            if g.time_left <= 0:
-                g.phase = "result"
-                g.guess_result = "timeout"
-                g.result_timer = time.time()
-
-        # Move to result after correct guess delay
-        if g.phase == "drawing" and g.guess_result == "correct":
-            if time.time() - g.result_timer > 2.0:
-                if g.current_round >= TOTAL_ROUNDS:
-                    g.phase = "game_over"
-                else:
-                    g.new_round()
-
-        # --- Prevent AI guessing phase from freezing the game ---
-        if g.phase == "guessing" and g.drawer == "ai":
-            # Automatically move to result after a short delay
-            if not hasattr(g, 'ai_guessing_start_time'):
-                g.ai_guessing_start_time = time.time()
-            if time.time() - g.ai_guessing_start_time > 2.0:
-                g.phase = "result"
-                g.guess_result = "ai_done"
-                g.result_timer = time.time()
-                del g.ai_guessing_start_time
-        else:
-            # Always clean up ai_guessing_start_time if not in AI guessing phase
-            if hasattr(g, 'ai_guessing_start_time'):
-                del g.ai_guessing_start_time
-
-        # ══════════════════ DRAWING ══════════════════
+        # ══════════════ RENDER ══════════════
         screen.fill(BG_COLOR)
 
-        # --- Render everything to a virtual surface ---
-        virtual_surface = pygame.Surface((SCREEN_WIDTH - PAGE_SCROLLBAR_W, VIRTUAL_PAGE_HEIGHT))
-        virtual_surface.fill(BG_COLOR)
+        if phase == "menu":
+            title = font_big.render("Skribbl \u2014 Draw & Guess!", True, PANEL_COLOR)
+            screen.blit(title, title.get_rect(center=(SW // 2, 140)))
+            sub = font_med.render("Play with friends on your network!", True, DARK_GRAY)
+            screen.blit(sub, sub.get_rect(center=(SW // 2, 200)))
 
-        # Only disable drawing and guess history mouse UI during AI guessing phase
-        drawing_mouse_ui_enabled = True
-        guess_history_mouse_ui_enabled = True
-        if g.phase == "guessing" and g.drawer == "ai":
-            drawing_mouse_ui_enabled = False
-            guess_history_mouse_ui_enabled = False
+            lbl = font_small.render("Your Name:", True, DARK_GRAY)
+            screen.blit(lbl, (SW // 2 - 150, 255))
+            name_rect = pygame.Rect(SW // 2 - 150, 280, 300, 40)
+            draw_text_input(screen, name_text, name_rect, active_input == "name")
 
-        # Replace all 'screen' with 'virtual_surface' below for drawing
-        draw_target = virtual_surface
+            host_btn = pygame.Rect(SW // 2 - 260, 380, 240, 55)
+            draw_button(screen, "HOST GAME", host_btn, ACCENT if name_text.strip() else GRAY)
+            join_btn = pygame.Rect(SW // 2 + 20, 380, 240, 55)
+            draw_button(screen, "JOIN GAME", join_btn, ACCENT if name_text.strip() else GRAY)
 
-        # ── MENU ──
-        # Draw fullscreen toggle button (top right)
-        fs_btn_rect = pygame.Rect(SCREEN_WIDTH - PAGE_SCROLLBAR_W - 160, 10, 140, 38)
-        draw_button(draw_target, "Toggle Fullscreen (F11)", fs_btn_rect, ACCENT, WHITE, font_small)
-        # Handle mouse click on fullscreen button
-        # Fullscreen button should always be enabled
-        if pygame.mouse.get_pressed()[0]:
-            if fs_btn_rect.collidepoint(mx, my + page_scroll_offset):
-                pygame.time.wait(200)  # debounce
-                fullscreen = not fullscreen
-                set_screen(fullscreen)
+            tip = font_tiny.render("HOST starts a server. JOIN connects to a friend's game.", True, DARK_GRAY)
+            screen.blit(tip, tip.get_rect(center=(SW // 2, 460)))
 
-        # --- All other drawing below should use draw_target instead of screen ---
-        # (for brevity, not replacing every instance here, but you should replace all 'screen' with 'draw_target' in the rest of the code)
+            if error_msg:
+                err = font_small.render(error_msg, True, WRONG_RED)
+                screen.blit(err, err.get_rect(center=(SW // 2, 500)))
 
-        if g.phase == "menu":
-            title = font_big.render("Skribbl — Draw & Guess!", True, PANEL_COLOR)
-            draw_target.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 200)))
+        elif phase == "joining":
+            title = font_big.render("Join Game", True, PANEL_COLOR)
+            screen.blit(title, title.get_rect(center=(SW // 2, 160)))
 
-            info = font_med.render("One player draws, the other guesses!", True, DARK_GRAY)
-            draw_target.blit(info, info.get_rect(center=(SCREEN_WIDTH // 2, 270)))
+            lbl = font_small.render("Server IP address:", True, DARK_GRAY)
+            screen.blit(lbl, (SW // 2 - 150, 255))
+            ip_rect = pygame.Rect(SW // 2 - 150, 280, 300, 40)
+            draw_text_input(screen, ip_text, ip_rect, active_input == "ip")
 
-            rules = font_small.render(f"{TOTAL_ROUNDS} rounds  •  {ROUND_TIME}s per round  •  Type your guess & press Enter", True, DARK_GRAY)
-            draw_target.blit(rules, rules.get_rect(center=(SCREEN_WIDTH // 2, 320)))
+            connect_btn = pygame.Rect(SW // 2 - 110, 350, 220, 50)
+            draw_button(screen, "CONNECT", connect_btn, ACCENT if ip_text.strip() else GRAY)
+            back_btn = pygame.Rect(SW // 2 - 110, 420, 220, 50)
+            draw_button(screen, "BACK", back_btn, DARK_GRAY)
 
-            play_btn = pygame.Rect(SCREEN_WIDTH // 2 - 120, 400, 240, 55)
-            draw_button(draw_target, "PLAY", play_btn, ACCENT)
+            if error_msg:
+                err = font_small.render(error_msg, True, WRONG_RED)
+                screen.blit(err, err.get_rect(center=(SW // 2, 500)))
 
-        # ── SHOW WORD (drawer sees the word) ──
-        elif g.phase == "show_word":
-            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 160))
-            draw_target.blit(overlay, (0, 0))
+        elif phase == "lobby":
+            title = font_big.render("Lobby", True, PANEL_COLOR)
+            screen.blit(title, title.get_rect(center=(SW // 2, 100)))
 
-            box = pygame.Rect(SCREEN_WIDTH // 2 - 250, SCREEN_HEIGHT // 2 - 100, 500, 200)
-            draw_rounded_rect(draw_target, WHITE, box, 16)
+            if server_inst:
+                ip = get_local_ip()
+                ip_lbl = font_med.render(f"Your IP: {ip}  (share with friends!)", True, ACCENT)
+                screen.blit(ip_lbl, ip_lbl.get_rect(center=(SW // 2, 160)))
 
-            t1 = font_med.render(f"Round {g.current_round} / {TOTAL_ROUNDS}", True, DARK_GRAY)
-            draw_target.blit(t1, t1.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 60)))
+            waiting = font_small.render("Waiting for players\u2026", True, DARK_GRAY)
+            screen.blit(waiting, waiting.get_rect(center=(SW // 2, 210)))
 
-            if g.drawer == "player":
-                t2 = font_med.render("Your word to draw:", True, DARK_GRAY)
-                draw_target.blit(t2, t2.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 20)))
-                t3 = font_big.render(g.word.upper(), True, ACCENT)
-                draw_target.blit(t3, t3.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 30)))
-                t4 = font_small.render("Click or press any key to start drawing", True, GRAY)
-                draw_target.blit(t4, t4.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 80)))
+            # player list
+            y_off = 260
+            for i, p in enumerate(players):
+                tag = ""
+                if p["id"] == my_id:
+                    tag += " (you)"
+                if is_host and p["id"] == my_id:
+                    tag += " \u2605 HOST"
+                txt = font_med.render(f"  {p['name']}{tag}", True, PANEL_COLOR)
+                screen.blit(txt, (SW // 2 - 150, y_off))
+                y_off += 35
+
+            if is_host:
+                start_btn = pygame.Rect(SW // 2 - 120, 500, 240, 55)
+                can_start = len(players) >= 2
+                draw_button(screen, "START GAME", start_btn, ACCENT if can_start else GRAY)
+                if not can_start:
+                    need = font_tiny.render("Need at least 2 players", True, DARK_GRAY)
+                    screen.blit(need, need.get_rect(center=(SW // 2, 570)))
             else:
-                t2 = font_med.render("AI is drawing this round!", True, DARK_GRAY)
-                draw_target.blit(t2, t2.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)))
-                t3 = font_small.render("Click or press any key to continue", True, GRAY)
-                draw_target.blit(t3, t3.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 50)))
+                wmsg = font_small.render("Waiting for host to start\u2026", True, DARK_GRAY)
+                screen.blit(wmsg, wmsg.get_rect(center=(SW // 2, 520)))
 
-        # ── DRAWING PHASE ──
-        elif g.phase == "drawing":
-            # Show who is drawing and the word if player is the drawer
-            if g.drawer == "ai":
-                # Draw 'AI is drawing...' label above the canvas
-                ai_label = font_big.render("AI is drawing...", True, ACCENT)
-                draw_target.blit(ai_label, (CANVAS_X + CANVAS_W//2 - ai_label.get_width()//2, CANVAS_Y - 60))
-                # Gradual AI drawing: draw a little each frame
-                if not hasattr(g, 'ai_draw_steps') or g.ai_draw_steps is None:
-                    g.canvas.fill(WHITE)
-                    g.ai_draw_steps = []
-                    for _ in range(12):
-                        color = random.choice(PALETTE)
-                        x1 = random.randint(0, CANVAS_W)
-                        y1 = random.randint(0, CANVAS_H)
-                        x2 = random.randint(0, CANVAS_W)
-                        y2 = random.randint(0, CANVAS_H)
-                        size = random.choice(BRUSH_SIZES)
-                        g.ai_draw_steps.append(('line', color, x1, y1, x2, y2, size))
-                    for _ in range(4):
-                        color = random.choice(PALETTE)
-                        x = random.randint(0, CANVAS_W-40)
-                        y = random.randint(0, CANVAS_H-40)
-                        w = random.randint(20, 80)
-                        h = random.randint(20, 80)
-                        g.ai_draw_steps.append(('ellipse', color, x, y, w, h))
-                    g.ai_draw_step_idx = 0
-                if g.ai_draw_step_idx < len(g.ai_draw_steps):
-                    step = g.ai_draw_steps[g.ai_draw_step_idx]
-                    if step[0] == 'line':
-                        _, color, x1, y1, x2, y2, size = step
-                        pygame.draw.line(g.canvas, color, (x1, y1), (x2, y2), size)
-                    elif step[0] == 'ellipse':
-                        _, color, x, y, w, h = step
-                        pygame.draw.ellipse(g.canvas, color, (x, y, w, h), 0)
-                    g.ai_draw_step_idx += 1
-                # Player guesses (rest of drawing phase logic remains, but player can only guess)
-                if g.ai_draw_step_idx >= len(g.ai_draw_steps):
-                    if not hasattr(g, 'ai_drawn_time') or g.ai_drawn_time is None:
-                        g.ai_drawn_time = time.time()
-                    g.ai_drawn = True
-                    # Show the completed drawing for 2 seconds before moving to guessing
-                    if time.time() - g.ai_drawn_time > 2.0 and g.guess_result == "":
-                        g.guess_result = "ai_drawn_done"
-                else:
-                    g.ai_drawn = False
-                    g.ai_drawn_time = None
+        elif phase == "playing":
+            am_drawer = (drawer_id == my_id)
+            right_x = CANVAS_X + canvas_w + 10
+
+            # ── left panel ──
+            panel = pygame.Rect(0, 0, LEFT_W, SH)
+            draw_rounded_rect(screen, PANEL_COLOR, panel, 0)
+
+            r_txt = font_small.render(f"Round {current_round}/{total_rounds}", True, WHITE)
+            screen.blit(r_txt, (15, 10))
+
+            # who's drawing
+            if am_drawer:
+                d_txt = font_small.render("You are drawing!", True, CORRECT_GREEN)
             else:
-                # Show the word to the player above the canvas
-                # Only show the word to the player, not to the AI
-                if g.drawer == "player":
-                    word_label = font_big.render(f"Your word: {g.word.upper()}", True, ACCENT)
-                    draw_target.blit(word_label, (CANVAS_X + CANVAS_W//2 - word_label.get_width()//2, CANVAS_Y - 60))
-                g.ai_drawn = False
-            # else removed: no action needed here
-            # Left panel
-            panel_rect = pygame.Rect(0, 0, 190, SCREEN_HEIGHT)
-            draw_rounded_rect(draw_target, PANEL_COLOR, panel_rect, 0)
+                d_txt = font_small.render(f"{drawer_name} draws", True, ACCENT)
+            screen.blit(d_txt, (15, 35))
 
-            # Round & Score
-            r_txt = font_small.render(f"Round {g.current_round}/{TOTAL_ROUNDS}", True, WHITE)
-            draw_target.blit(r_txt, (15, 10))
-            s_txt = font_small.render(f"Score: {g.score}", True, ACCENT)
-            draw_target.blit(s_txt, (15, 35))
-
-            # Palette label
-            p_label = font_tiny.render("COLORS", True, GRAY)
-            draw_target.blit(p_label, (15, 63))
-
-            # Color palette
-            for i, color in enumerate(PALETTE):
+            # palette
+            p_lbl = font_tiny.render("COLORS", True, GRAY)
+            screen.blit(p_lbl, (15, 83))
+            for i, col in enumerate(PALETTE):
                 cx = 20 + (i % 2) * 40
-                cy = 80 + (i // 2) * 40
-                crect = pygame.Rect(cx, cy, 34, 34)
-                pygame.draw.rect(draw_target, color, crect, border_radius=4)
-                if color == g.draw_color:
-                    pygame.draw.rect(draw_target, WHITE, crect, 3, border_radius=4)
+                cy = 100 + (i // 2) * 40
+                cr = pygame.Rect(cx, cy, 34, 34)
+                pygame.draw.rect(screen, col, cr, border_radius=4)
+                if col == draw_color and am_drawer:
+                    pygame.draw.rect(screen, WHITE, cr, 3, border_radius=4)
                 else:
-                    pygame.draw.rect(draw_target, DARK_GRAY, crect, 1, border_radius=4)
+                    pygame.draw.rect(screen, DARK_GRAY, cr, 1, border_radius=4)
 
-            # Brush sizes
-            bs_label = font_tiny.render("BRUSH SIZE", True, GRAY)
-            draw_target.blit(bs_label, (15, CANVAS_Y + CANVAS_H + 3))
-            for i, size in enumerate(BRUSH_SIZES):
+            # brush sizes
+            bs_lbl = font_tiny.render("BRUSH SIZE", True, GRAY)
+            screen.blit(bs_lbl, (15, CANVAS_Y + canvas_h + 3))
+            for i, sz in enumerate(BRUSH_SIZES):
                 bx = 20 + i * 34
-                by = CANVAS_Y + CANVAS_H + 20
-                brect = pygame.Rect(bx, by, 30, 30)
-                draw_rounded_rect(draw_target, (70, 75, 90) if size != g.brush_size else ACCENT, brect, 6)
-                pygame.draw.circle(draw_target, WHITE, brect.center, min(size // 2, 12))
+                by = CANVAS_Y + canvas_h + 20
+                br = pygame.Rect(bx, by, 30, 30)
+                draw_rounded_rect(screen, ACCENT if sz == brush_size and am_drawer else (70, 75, 90), br, 6)
+                pygame.draw.circle(screen, WHITE, br.center, min(sz // 2, 12))
 
-            # Clear button
-            clear_btn = pygame.Rect(20, CANVAS_Y + CANVAS_H + 60, 160, 35)
-            draw_button(draw_target, "Clear Canvas", clear_btn, WRONG_RED, WHITE, font_small)
+            # clear button
+            if am_drawer:
+                clr_btn = pygame.Rect(20, CANVAS_Y + canvas_h + 60, 160, 35)
+                draw_button(screen, "Clear Canvas", clr_btn, WRONG_RED, WHITE, font_small)
 
-            # Canvas border + surface
-            canvas_border = pygame.Rect(CANVAS_X - 2, CANVAS_Y - 2, CANVAS_W + 4, CANVAS_H + 4)
-            pygame.draw.rect(draw_target, DARK_GRAY, canvas_border, 2, border_radius=4)
-            draw_target.blit(g.canvas, (CANVAS_X, CANVAS_Y))
+            # ── canvas ──
+            # word / hint above canvas
+            if am_drawer:
+                wl = font_big.render(f"Draw: {word.upper()}", True, ACCENT)
+                screen.blit(wl, (CANVAS_X, CANVAS_Y - 50))
+            else:
+                hl = font_med.render(f"Hint: {hint}", True, DARK_GRAY)
+                screen.blit(hl, (CANVAS_X, CANVAS_Y - 40))
 
-            # Timer bar
-            timer_ratio = g.time_left / ROUND_TIME
-            bar_rect = pygame.Rect(CANVAS_X, CANVAS_Y - 22, CANVAS_W, 16)
-            pygame.draw.rect(draw_target, GRAY, bar_rect, border_radius=4)
-            fill_color = CORRECT_GREEN if timer_ratio > 0.3 else (255, 180, 0) if timer_ratio > 0.1 else WRONG_RED
-            fill_rect = pygame.Rect(CANVAS_X, CANVAS_Y - 22, int(CANVAS_W * timer_ratio), 16)
-            pygame.draw.rect(draw_target, fill_color, fill_rect, border_radius=4)
-            timer_txt = font_tiny.render(f"{int(g.time_left)}s", True, BLACK)
-            draw_target.blit(timer_txt, (CANVAS_X + CANVAS_W - 30, CANVAS_Y - 23))
+            # timer bar
+            ratio = max(0, time_left / 60)
+            bar = pygame.Rect(CANVAS_X, CANVAS_Y - 14, canvas_w, 10)
+            pygame.draw.rect(screen, GRAY, bar, border_radius=4)
+            fc = CORRECT_GREEN if ratio > 0.3 else (255, 180, 0) if ratio > 0.1 else WRONG_RED
+            fill = pygame.Rect(CANVAS_X, CANVAS_Y - 14, int(canvas_w * ratio), 10)
+            pygame.draw.rect(screen, fc, fill, border_radius=4)
+            tt = font_tiny.render(f"{int(time_left)}s", True, BLACK)
+            screen.blit(tt, (CANVAS_X + canvas_w - 28, CANVAS_Y - 16))
 
-            # Hint
-            hint_txt = font_med.render(f"Hint: {g.hint}", True, DARK_GRAY)
-            draw_target.blit(hint_txt, (CANVAS_X, CANVAS_Y + CANVAS_H + 10))
+            # canvas border + surface
+            pygame.draw.rect(screen, DARK_GRAY, pygame.Rect(CANVAS_X - 2, CANVAS_Y - 2, canvas_w + 4, canvas_h + 4), 2, border_radius=4)
+            screen.blit(canvas, (CANVAS_X, CANVAS_Y))
 
-            # Guess input box
-            input_rect = pygame.Rect(CANVAS_X, CANVAS_Y + CANVAS_H + 45, CANVAS_W - 100, 36)
-            pygame.draw.rect(draw_target, WHITE, input_rect, border_radius=6)
-            pygame.draw.rect(draw_target, ACCENT if g.guess_result == "" else CORRECT_GREEN, input_rect, 2, border_radius=6)
-            inp_txt = font_input.render(g.guess_text + "│", True, BLACK)
-            draw_target.blit(inp_txt, (input_rect.x + 10, input_rect.y + 7))
+            # ── guess input (below canvas) ──
+            if not am_drawer and not guessed_correctly:
+                inp_rect = pygame.Rect(CANVAS_X, CANVAS_Y + canvas_h + 10, canvas_w - 80, 36)
+                pygame.draw.rect(screen, WHITE, inp_rect, border_radius=6)
+                pygame.draw.rect(screen, ACCENT, inp_rect, 2, border_radius=6)
+                gt = font_input.render(guess_text + "\u2502", True, BLACK)
+                screen.blit(gt, (inp_rect.x + 8, inp_rect.y + 7))
+                el = font_small.render("Enter \u21b5", True, DARK_GRAY)
+                screen.blit(el, (inp_rect.right + 8, inp_rect.y + 7))
+            elif not am_drawer and guessed_correctly:
+                gl = font_med.render("\u2713 You guessed it!", True, CORRECT_GREEN)
+                screen.blit(gl, (CANVAS_X, CANVAS_Y + canvas_h + 15))
+            elif am_drawer:
+                hl2 = font_small.render(f"Guessers see: {hint}", True, DARK_GRAY)
+                screen.blit(hl2, (CANVAS_X, CANVAS_Y + canvas_h + 15))
 
-            # Enter label
-            enter_label = font_small.render("Enter ↵", True, DARK_GRAY)
-            draw_target.blit(enter_label, (input_rect.right + 10, input_rect.y + 7))
+            # ── right panel: players + chat ──
+            rp = pygame.Rect(right_x, 0, SW - right_x, SH)
+            draw_rounded_rect(screen, PANEL_COLOR, rp, 0)
 
+            pl = font_small.render("PLAYERS", True, GRAY)
+            screen.blit(pl, (right_x + 10, 10))
 
-            # Scrollable guess history with vertical and horizontal scrollbars
-            # --- Scrollbar constants ---
-            GH_X = CANVAS_X
-            GH_Y = CANVAS_Y + CANVAS_H + 88
-            GH_W = CANVAS_W - 30  # leave space for vertical scrollbar
-            GH_H = 6 * 22  # show 6 guesses at a time
-            VSCROLLBAR_W = 18
-            HSCROLLBAR_H = 16
-            total_guesses = len(g.guesses)
-            max_visible = 6
-            scroll_area_rect = pygame.Rect(GH_X, GH_Y, GH_W, GH_H)
-            vscrollbar_rect = pygame.Rect(GH_X + GH_W + 4, GH_Y, VSCROLLBAR_W, GH_H)
-            hscrollbar_rect = pygame.Rect(GH_X, GH_Y + GH_H + 4, GH_W, HSCROLLBAR_H)
+            sorted_players = sorted(players, key=lambda p: p["score"], reverse=True)
+            py_pos = 35
+            for p in sorted_players:
+                suffix = ""
+                if p["id"] == drawer_id:
+                    suffix = " \U0001f3a8"
+                nm = font_small.render(f"{p['name']}{suffix}", True, ACCENT if p["id"] == my_id else WHITE)
+                sc = font_small.render(f"{p['score']}", True, GRAY)
+                screen.blit(nm, (right_x + 10, py_pos))
+                screen.blit(sc, (SW - 50, py_pos))
+                py_pos += 28
 
-            # Track scroll offsets in Game object
-            if not hasattr(g, 'guess_scroll_offset'):
-                g.guess_scroll_offset = 0
-            if not hasattr(g, 'guess_hscroll_offset'):
-                g.guess_hscroll_offset = 0
-            max_scroll = max(0, total_guesses - max_visible)
+            # chat/guess log
+            cl = font_small.render("CHAT", True, GRAY)
+            screen.blit(cl, (right_x + 10, py_pos + 15))
+            cy_pos = py_pos + 40
+            max_msgs = max(1, (SH - cy_pos - 10) // 22)
+            visible = chat_log[-max_msgs:]
+            for msg_text, msg_col in visible:
+                ct = font_tiny.render(msg_text, True, msg_col)
+                screen.blit(ct, (right_x + 10, cy_pos))
+                cy_pos += 22
 
-            # Find max guess width
-            max_guess_width = 0
-            for gtxt, _ in g.guesses:
-                gt = font_small.render(gtxt, True, BLACK)
-                max_guess_width = max(max_guess_width, gt.get_width())
-            max_hscroll = max(0, max_guess_width - GH_W)
-            # Clamp scroll offsets
-            g.guess_scroll_offset = max(0, min(g.guess_scroll_offset, max_scroll))
-            g.guess_hscroll_offset = max(0, min(g.guess_hscroll_offset, max_hscroll))
+        elif phase == "round_result":
+            box = pygame.Rect(SW // 2 - 250, SH // 2 - 140, 500, 280)
+            draw_rounded_rect(screen, WHITE, box, 16)
+            pygame.draw.rect(screen, DARK_GRAY, box, 2, border_radius=16)
 
-            # Draw guess history area (clip to area)
-            history_surface = pygame.Surface((GH_W, GH_H))
-            history_surface.fill(WHITE)
-            for i in range(max_visible):
-                idx = i + g.guess_scroll_offset
-                if idx < total_guesses:
-                    gtxt, gcol = g.guesses[idx]
-                    gt = font_small.render(gtxt, True, gcol)
-                    history_surface.blit(gt, (-g.guess_hscroll_offset, i * 22))
-            draw_target.blit(history_surface, (GH_X, GH_Y))
-
-            # Draw vertical scrollbar background
-            pygame.draw.rect(draw_target, LIGHT_GRAY, vscrollbar_rect, border_radius=8)
-            # Draw vertical scrollbar handle
-            if total_guesses > max_visible:
-                handle_h = max(24, int(GH_H * (max_visible / total_guesses)))
-                handle_y = GH_Y + int((GH_H - handle_h) * (g.guess_scroll_offset / max_scroll)) if max_scroll > 0 else GH_Y
-                vhandle_rect = pygame.Rect(vscrollbar_rect.x + 2, handle_y, VSCROLLBAR_W - 4, handle_h)
-                pygame.draw.rect(draw_target, ACCENT, vhandle_rect, border_radius=8)
-
-            # Draw horizontal scrollbar background
-            pygame.draw.rect(draw_target, LIGHT_GRAY, hscrollbar_rect, border_radius=8)
-            # Draw horizontal scrollbar handle
-            if max_guess_width > GH_W:
-                hhandle_w = max(24, int(GH_W * (GH_W / max_guess_width)))
-                hhandle_x = GH_X + int((GH_W - hhandle_w) * (g.guess_hscroll_offset / max_hscroll)) if max_hscroll > 0 else GH_X
-                hhandle_rect = pygame.Rect(hhandle_x, hscrollbar_rect.y + 2, hhandle_w, HSCROLLBAR_H - 4)
-                pygame.draw.rect(draw_target, ACCENT, hhandle_rect, border_radius=8)
-
-            # Handle mouse wheel for scrolling
-            if guess_history_mouse_ui_enabled:
-                for event in pygame.event.get(pygame.MOUSEWHEEL):
-                    if g.phase == "drawing":
-                        if scroll_area_rect.collidepoint(pygame.mouse.get_pos()) or vscrollbar_rect.collidepoint(pygame.mouse.get_pos()):
-                            g.guess_scroll_offset -= event.y  # up is positive, down is negative
-                            g.guess_scroll_offset = max(0, min(g.guess_scroll_offset, max_scroll))
-                        elif hscrollbar_rect.collidepoint(pygame.mouse.get_pos()):
-                            g.guess_hscroll_offset -= event.y * 20  # horizontal scroll with wheel
-                            g.guess_hscroll_offset = max(0, min(g.guess_hscroll_offset, max_hscroll))
-
-            # Handle vertical scrollbar dragging
-            if not hasattr(g, 'vscrollbar_dragging'):
-                g.vscrollbar_dragging = False
-                g.vscrollbar_drag_offset = 0
-            mouse_x, mouse_y = pygame.mouse.get_pos()
-            mouse_pressed = pygame.mouse.get_pressed()[0]
-            if guess_history_mouse_ui_enabled:
-                if mouse_pressed and total_guesses > max_visible:
-                    if not g.vscrollbar_dragging:
-                        if 'vhandle_rect' in locals() and vhandle_rect.collidepoint((mouse_x, mouse_y)):
-                            g.vscrollbar_dragging = True
-                            g.vscrollbar_drag_offset = mouse_y - vhandle_rect.y
-                    else:
-                        rel_y = mouse_y - GH_Y - g.vscrollbar_drag_offset
-                        rel_y = max(0, min(rel_y, GH_H - handle_h))
-                        g.guess_scroll_offset = int((rel_y / (GH_H - handle_h)) * max_scroll) if (GH_H - handle_h) > 0 else 0
-                else:
-                    g.vscrollbar_dragging = False
-
-                # Handle horizontal scrollbar dragging
-                if not hasattr(g, 'hscrollbar_dragging'):
-                    g.hscrollbar_dragging = False
-                    g.hscrollbar_drag_offset = 0
-                if mouse_pressed and max_guess_width > GH_W:
-                    if not g.hscrollbar_dragging:
-                        if 'hhandle_rect' in locals() and hhandle_rect.collidepoint((mouse_x, mouse_y)):
-                            g.hscrollbar_dragging = True
-                            g.hscrollbar_drag_offset = mouse_x - hhandle_rect.x
-                    else:
-                        rel_x = mouse_x - GH_X - g.hscrollbar_drag_offset
-                        rel_x = max(0, min(rel_x, GH_W - hhandle_w))
-                        g.guess_hscroll_offset = int((rel_x / (GH_W - hhandle_w)) * max_hscroll) if (GH_W - hhandle_w) > 0 else 0
-                else:
-                    g.hscrollbar_dragging = False
-
-            # Correct overlay
-            if g.guess_result == "correct":
-                overlay = pygame.Surface((CANVAS_W, CANVAS_H), pygame.SRCALPHA)
-                overlay.fill((40, 200, 80, 60))
-                draw_target.blit(overlay, (CANVAS_X, CANVAS_Y))
-                correct_txt = font_big.render("CORRECT!", True, CORRECT_GREEN)
-                draw_target.blit(correct_txt, correct_txt.get_rect(center=(CANVAS_X + CANVAS_W // 2, CANVAS_Y + CANVAS_H // 2)))
-
-        # ── RESULT ──
-        elif g.phase == "result":
-            box = pygame.Rect(SCREEN_WIDTH // 2 - 250, SCREEN_HEIGHT // 2 - 120, 500, 240)
-            draw_rounded_rect(draw_target, WHITE, box, 16)
-            pygame.draw.rect(draw_target, DARK_GRAY, box, 2, border_radius=16)
-
-            if g.guess_result == "timeout":
+            if result_reason == "timeout":
                 t1 = font_big.render("Time's Up!", True, WRONG_RED)
+            elif result_reason == "all_guessed":
+                t1 = font_big.render("Everyone Guessed!", True, CORRECT_GREEN)
+            elif result_reason == "drawer_left":
+                t1 = font_big.render("Drawer Left", True, DARK_GRAY)
             else:
-                t1 = font_big.render("Round Skipped", True, DARK_GRAY)
-            draw_target.blit(t1, t1.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 70)))
+                t1 = font_big.render("Round Over", True, DARK_GRAY)
+            screen.blit(t1, t1.get_rect(center=(SW // 2, SH // 2 - 90)))
 
-            t2 = font_med.render(f'The word was: "{g.word.upper()}"', True, DARK_GRAY)
-            draw_target.blit(t2, t2.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 15)))
+            t2 = font_med.render(f'The word was: "{result_word.upper()}"', True, DARK_GRAY)
+            screen.blit(t2, t2.get_rect(center=(SW // 2, SH // 2 - 30)))
 
-            t3 = font_small.render(f"Score: {g.score}", True, ACCENT)
-            draw_target.blit(t3, t3.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 30)))
+            sorted_p = sorted(players, key=lambda p: p["score"], reverse=True)
+            sy = SH // 2 + 10
+            for p in sorted_p[:5]:
+                st = font_small.render(f"{p['name']}: {p['score']} pts", True, ACCENT if p["id"] == my_id else DARK_GRAY)
+                screen.blit(st, st.get_rect(center=(SW // 2, sy)))
+                sy += 25
 
-            t4 = font_small.render("Click or press any key to continue", True, GRAY)
-            draw_target.blit(t4, t4.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 80)))
+            t4 = font_tiny.render("Next round starting soon\u2026", True, GRAY)
+            screen.blit(t4, t4.get_rect(center=(SW // 2, SH // 2 + 120)))
 
-        # ── GAME OVER ──
-        elif g.phase == "game_over":
+        elif phase == "game_over":
             t1 = font_big.render("Game Over!", True, PANEL_COLOR)
-            draw_target.blit(t1, t1.get_rect(center=(SCREEN_WIDTH // 2, 220)))
+            screen.blit(t1, t1.get_rect(center=(SW // 2, 120)))
 
-            t2 = font_big.render(f"Final Score: {g.score}", True, ACCENT)
-            draw_target.blit(t2, t2.get_rect(center=(SCREEN_WIDTH // 2, 300)))
+            sorted_p = sorted(players, key=lambda p: p["score"], reverse=True)
+            if sorted_p:
+                winner = font_big.render(f"\U0001f3c6 {sorted_p[0]['name']} wins!", True, ACCENT)
+                screen.blit(winner, winner.get_rect(center=(SW // 2, 200)))
 
-            grade = "Amazing!" if g.score > 500 else "Great!" if g.score > 300 else "Good job!" if g.score > 100 else "Keep practicing!"
-            t3 = font_med.render(grade, True, CORRECT_GREEN if g.score > 300 else DARK_GRAY)
-            draw_target.blit(t3, t3.get_rect(center=(SCREEN_WIDTH // 2, 370)))
+            sy = 270
+            for i, p in enumerate(sorted_p):
+                medal = ["\U0001f947", "\U0001f948", "\U0001f949"][i] if i < 3 else f"  {i+1}."
+                col = ACCENT if p["id"] == my_id else DARK_GRAY
+                st = font_med.render(f"{medal} {p['name']}  \u2014  {p['score']} pts", True, col)
+                screen.blit(st, st.get_rect(center=(SW // 2, sy)))
+                sy += 40
 
-            play_btn = pygame.Rect(SCREEN_WIDTH // 2 - 120, 440, 240, 55)
-            draw_button(draw_target, "PLAY AGAIN", play_btn, ACCENT)
+            lobby_btn = pygame.Rect(SW // 2 - 120, 520, 240, 55)
+            draw_button(screen, "BACK TO LOBBY", lobby_btn, ACCENT)
 
-        # --- Blit the visible part of the virtual surface to the screen ---
-        screen.blit(virtual_surface, (0, 0), area=pygame.Rect(0, page_scroll_offset, SCREEN_WIDTH - PAGE_SCROLLBAR_W, SCREEN_HEIGHT))
-
-        # --- Draw the page scrollbar ---
-        max_page_scroll = max(0, VIRTUAL_PAGE_HEIGHT - SCREEN_HEIGHT)
-        scrollbar_rect = pygame.Rect(SCREEN_WIDTH - PAGE_SCROLLBAR_W, 0, PAGE_SCROLLBAR_W, SCREEN_HEIGHT)
-        pygame.draw.rect(screen, LIGHT_GRAY, scrollbar_rect, border_radius=8)
-        if max_page_scroll > 0:
-            handle_h = max(40, int(SCREEN_HEIGHT * (SCREEN_HEIGHT / VIRTUAL_PAGE_HEIGHT)))
-            handle_y = int((SCREEN_HEIGHT - handle_h) * (page_scroll_offset / max_page_scroll)) if max_page_scroll > 0 else 0
-            handle_rect = pygame.Rect(SCREEN_WIDTH - PAGE_SCROLLBAR_W + 2, handle_y, PAGE_SCROLLBAR_W - 4, handle_h)
-            pygame.draw.rect(screen, ACCENT, handle_rect, border_radius=8)
-            # Handle scrollbar dragging
-            mouse_x, mouse_y = pygame.mouse.get_pos()
-            mouse_pressed = pygame.mouse.get_pressed()[0]
-            # Page scrollbar should always be enabled
-            if not hasattr(g, 'page_scrollbar_dragging'):
-                g.page_scrollbar_dragging = False
-                g.page_scrollbar_drag_offset = 0
-            if mouse_pressed:
-                if not g.page_scrollbar_dragging:
-                    if handle_rect.collidepoint(mouse_x, mouse_y):
-                        g.page_scrollbar_dragging = True
-                        g.page_scrollbar_drag_offset = mouse_y - handle_rect.y
-                else:
-                    rel_y = mouse_y - g.page_scrollbar_drag_offset
-                    rel_y = max(0, min(rel_y, SCREEN_HEIGHT - handle_h))
-                    page_scroll_offset = int((rel_y / (SCREEN_HEIGHT - handle_h)) * max_page_scroll) if (SCREEN_HEIGHT - handle_h) > 0 else 0
-            else:
-                g.page_scrollbar_dragging = False
-
-        # Blit the virtual surface to the main screen before flipping
-        screen.blit(virtual_surface, (0, -page_scroll_offset))
         pygame.display.flip()
 
+    # cleanup
+    net.disconnect()
+    if server_inst:
+        server_inst.stop()
     pygame.quit()
     sys.exit()
 

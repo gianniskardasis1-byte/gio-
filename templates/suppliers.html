@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Suppliers{% endblock %}
+{% block page_title %}Suppliers{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h3>🏭 Supplier Directory</h3>
+    <form method="get" class="filter-bar">
+      <input type="text" name="q" placeholder="Search name, country, ID…" value="{{ query }}">
+      <button type="submit" class="btn btn-primary">Search</button>
+      {% if query %}<a href="{{ url_for('suppliers') }}" class="btn btn-outline">Clear</a>{% endif %}
+    </form>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Supplier ID</th>
+          <th>Name</th>
+          <th>Country</th>
+          <th>Accreditation</th>
+          <th>Status</th>
+          <th>On-Time %</th>
+          <th>Defect Rate %</th>
+          <th>Contact</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in suppliers %}
+        <tr>
+          <td><strong>{{ s.id }}</strong></td>
+          <td>{{ s.name }}</td>
+          <td>{{ s.country }}</td>
+          <td><span class="badge badge-info">{{ s.accreditation }}</span></td>
+          <td>
+            <span class="badge {% if s.status == 'Approved' %}badge-success{% elif s.status == 'Under Review' %}badge-warning{% else %}badge-danger{% endif %}">
+              {{ s.status }}
+            </span>
+          </td>
+          <td>
+            <div class="sensor-bar-wrap">
+              {{ s.on_time_pct }}%
+              <div class="sensor-bar-bg">
+                <div class="sensor-bar-fill {% if s.on_time_pct < 80 %}danger{% endif %}"
+                     style="width:{{ s.on_time_pct }}%"></div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <span class="badge {% if s.defect_rate < 1.5 %}badge-success{% elif s.defect_rate < 3 %}badge-warning{% else %}badge-danger{% endif %}">
+              {{ s.defect_rate }}%
+            </span>
+          </td>
+          <td>
+            <a href="mailto:{{ s.email }}" style="color:var(--primary);text-decoration:none;font-size:.82rem;">
+              {{ s.email }}
+            </a>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" style="text-align:center;padding:24px;color:var(--muted);">No suppliers match your search.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

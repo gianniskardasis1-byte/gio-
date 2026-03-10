@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Shipments{% endblock %}
+{% block page_title %}Shipment Tracking{% endblock %}
+
+{% block content %}
+{% for s in shipments %}
+<div class="card">
+  <div class="card-header">
+    <div>
+      <h3>🚢 {{ s.id }} &mdash; {{ s.tracking }}</h3>
+      <small style="color:var(--muted);">Order: {{ s.order_id }} &nbsp;|&nbsp; Carrier: {{ s.carrier }}</small>
+    </div>
+    <span class="badge status-{{ s.status_class }}">{{ s.status }}</span>
+  </div>
+  <div class="card-body">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px;">
+
+      <div>
+        <div style="font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Origin</div>
+        <div>{{ s.origin }}</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Destination</div>
+        <div>{{ s.destination }}</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">ETA</div>
+        <div>{{ s.eta }}</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Last Location</div>
+        <div>{{ s.last_location }}</div>
+      </div>
+
+      {% if s.temperature is not none %}
+      <div>
+        <div style="font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Temperature</div>
+        <div>{{ s.temperature }} °C</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Vibration</div>
+        <div>{{ s.vibration }} mm/s</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Pressure</div>
+        <div>{{ s.pressure }} kPa</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Shock Detected</div>
+        <div>
+          <span class="badge {% if s.shock %}badge-danger{% else %}badge-success{% endif %}">
+            {% if s.shock %}YES{% else %}NO{% endif %}
+          </span>
+        </div>
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+</div>
+{% else %}
+<p style="color:var(--muted);">No shipments found.</p>
+{% endfor %}
+{% endblock %}
