@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}QC Reports{% endblock %}
+{% block page_title %}QC Reports{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h3>🔬 Quality Control Reports</h3>
+    <form method="get" class="filter-bar">
+      <select name="result">
+        <option value="">All Results</option>
+        {% for r in results %}
+          <option value="{{ r }}" {% if r == result_filter %}selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-primary">Filter</button>
+      {% if result_filter %}<a href="{{ url_for('qc') }}" class="btn btn-outline">Clear</a>{% endif %}
+    </form>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Report ID</th>
+          <th>Order</th>
+          <th>Part</th>
+          <th>Supplier</th>
+          <th>Type</th>
+          <th>Inspector</th>
+          <th>Created</th>
+          <th>Status</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in reports %}
+        <tr>
+          <td><strong>{{ r.id }}</strong></td>
+          <td>{{ r.order_id }}</td>
+          <td>{{ r.part }}</td>
+          <td>{{ r.supplier }}</td>
+          <td><span class="badge badge-secondary">{{ r.type }}</span></td>
+          <td>{{ r.inspector }}</td>
+          <td>{{ r.created }}</td>
+          <td><span class="badge status-{{ r.status_class }}">{{ r.status }}</span></td>
+          <td>
+            <span class="badge {% if r.result == 'PASS' %}badge-success{% elif r.result == 'FAIL' %}badge-danger{% else %}badge-secondary{% endif %}">
+              {{ r.result }}
+            </span>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="9" style="text-align:center;padding:24px;color:var(--muted);">No reports found.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Certifications{% endblock %}
+{% block page_title %}Component Certifications{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h3>🏅 Component Certifications</h3>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Cert ID</th>
+          <th>Report</th>
+          <th>Part</th>
+          <th>Supplier</th>
+          <th>Inspector</th>
+          <th>Batch</th>
+          <th>Origin</th>
+          <th>Finalized</th>
+          <th>Status</th>
+          <th>Immutable</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in certifications %}
+        <tr>
+          <td><strong>{{ c.id }}</strong></td>
+          <td>{{ c.report_id }}</td>
+          <td>{{ c.part }}</td>
+          <td>{{ c.supplier }}</td>
+          <td>{{ c.inspector }}</td>
+          <td>{{ c.batch }}</td>
+          <td>{{ c.origin }}</td>
+          <td>{{ c.finalized or '—' }}</td>
+          <td><span class="badge status-{{ c.status_class }}">{{ c.status }}</span></td>
+          <td>
+            {% if c.immutable %}
+              <span class="badge badge-danger" title="Record is locked and cannot be modified">🔒 Locked</span>
+            {% else %}
+              <span class="badge badge-secondary">Editable</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="10" style="text-align:center;padding:24px;color:var(--muted);">No certifications found.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
