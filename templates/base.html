@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AeroNetB — {% block title %}Dashboard{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<!-- ── Sidebar ── -->
+<aside class="sidebar">
+  <div class="sidebar-brand">
+    <h1>✈ AeroNetB</h1>
+    <small>Aerospace Supply Chain</small>
+  </div>
+  <nav class="sidebar-nav">
+    <a href="{{ url_for('index') }}"          class="{{ 'active' if request.endpoint == 'index' }}">
+      <span class="icon">🏠</span> Dashboard
+    </a>
+    <a href="{{ url_for('suppliers') }}"      class="{{ 'active' if request.endpoint == 'suppliers' }}">
+      <span class="icon">🏭</span> Suppliers
+    </a>
+    <a href="{{ url_for('orders') }}"         class="{{ 'active' if request.endpoint == 'orders' }}">
+      <span class="icon">📦</span> Purchase Orders
+    </a>
+    <a href="{{ url_for('shipments') }}"      class="{{ 'active' if request.endpoint == 'shipments' }}">
+      <span class="icon">🚢</span> Shipments
+    </a>
+    <a href="{{ url_for('qc') }}"             class="{{ 'active' if request.endpoint == 'qc' }}">
+      <span class="icon">🔬</span> QC Reports
+    </a>
+    <a href="{{ url_for('certifications') }}" class="{{ 'active' if request.endpoint == 'certifications' }}">
+      <span class="icon">🏅</span> Certifications
+    </a>
+    <a href="{{ url_for('iot') }}"            class="{{ 'active' if request.endpoint == 'iot' }}">
+      <span class="icon">📡</span> IoT Monitoring
+    </a>
+    <a href="{{ url_for('audit') }}"          class="{{ 'active' if request.endpoint == 'audit' }}">
+      <span class="icon">📋</span> Audit Log
+    </a>
+  </nav>
+  <div class="sidebar-footer">AeroNetB v1.0 &mdash; 2026</div>
+</aside>
+
+<!-- ── Main ── -->
+<div class="main">
+  <header class="topbar">
+    <h2>{% block page_title %}Dashboard{% endblock %}</h2>
+    <div class="topbar-right">
+      <span>👤 Supply Chain Manager</span>
+      <span>📅 {{ now }}</span>
+    </div>
+  </header>
+
+  <div class="page-content">
+    {% block content %}{% endblock %}
+  </div>
+</div>
+
+</body>
+</html>

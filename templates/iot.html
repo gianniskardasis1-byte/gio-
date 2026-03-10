@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}IoT Monitoring{% endblock %}
+{% block page_title %}IoT Monitoring{% endblock %}
+
+{% block content %}
+
+{% if alerts %}
+<div class="alert-banner danger">
+  ⚠ <strong>{{ alerts|length }} active alert{{ 's' if alerts|length > 1 }}:</strong>
+  {% for a in alerts %}
+    {{ a.id }} ({{ a.type }}: {{ a.value }} {{ a.unit }}){% if not loop.last %}, {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">
+    <h3>📡 IoT Devices &amp; Sensor Readings</h3>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Device ID</th>
+          <th>Sensor Type</th>
+          <th>Target</th>
+          <th>Facility</th>
+          <th>Last Value</th>
+          <th>Threshold</th>
+          <th>Last Reading</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for d in devices %}
+        <tr>
+          <td><strong>{{ d.id }}</strong></td>
+          <td><span class="badge badge-info">{{ d.type }}</span></td>
+          <td>{{ d.target }}</td>
+          <td>{{ d.facility }}</td>
+          <td>
+            {% if d.value is not none %}
+              <div class="sensor-bar-wrap">
+                <span>{{ d.value }} {{ d.unit }}</span>
+                {% if d.threshold_max is not none and d.threshold_max != 0 %}
+                <div class="sensor-bar-bg">
+                  <div class="sensor-bar-fill {% if d.anomaly %}danger{% endif %}"
+                       style="width:{{ [[(d.value / d.threshold_max * 100)|int, 0]|max, 100]|min }}%"></div>
+                </div>
+                {% endif %}
+              </div>
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>
+            {% if d.threshold_min is not none %}
+              {{ d.threshold_min }}–{{ d.threshold_max }} {{ d.unit }}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>{{ d.last_reading }}</td>
+          <td>
+            <span class="badge status-{{ d.status_class }}">
+              {% if d.anomaly %}⚠ ALERT{% else %}OK{% endif %}
+            </span>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" style="text-align:center;padding:24px;color:var(--muted);">No devices found.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

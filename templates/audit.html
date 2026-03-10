@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Audit Log{% endblock %}
+{% block page_title %}Audit Log{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h3>📋 Compliance Audit Trail</h3>
+    <form method="get" class="filter-bar">
+      <input type="text" name="emp" placeholder="Search employee ID or name…" value="{{ emp_filter }}">
+      <button type="submit" class="btn btn-primary">Search</button>
+      {% if emp_filter %}<a href="{{ url_for('audit') }}" class="btn btn-outline">Clear</a>{% endif %}
+    </form>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Event Time</th>
+          <th>Employee</th>
+          <th>Role</th>
+          <th>Action</th>
+          <th>Entity</th>
+          <th>Entity Key</th>
+          <th>Outcome</th>
+          <th>Source IP</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for log in logs %}
+        <tr>
+          <td>{{ log.time }}</td>
+          <td>{{ log.employee }} <small style="color:var(--muted)">({{ log.emp_id }})</small></td>
+          <td><span class="badge badge-secondary">{{ log.role }}</span></td>
+          <td><span class="badge badge-primary">{{ log.action }}</span></td>
+          <td>{{ log.entity }}</td>
+          <td><strong>{{ log.entity_key }}</strong></td>
+          <td>
+            <span class="badge {% if log.outcome == 'SUCCESS' %}badge-success{% else %}badge-danger{% endif %}">
+              {{ log.outcome }}
+            </span>
+          </td>
+          <td style="font-family:monospace;font-size:.8rem;">{{ log.source_ip }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" style="text-align:center;padding:24px;color:var(--muted);">No audit records found.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
