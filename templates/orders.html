@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Purchase Orders{% endblock %}
+{% block page_title %}Purchase Orders{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h3>📦 Purchase Orders</h3>
+    <form method="get" class="filter-bar">
+      <select name="status">
+        <option value="">All Statuses</option>
+        {% for st in statuses %}
+          <option value="{{ st }}" {% if st == status_filter %}selected{% endif %}>{{ st }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-primary">Filter</button>
+      {% if status_filter %}<a href="{{ url_for('orders') }}" class="btn btn-outline">Clear</a>{% endif %}
+    </form>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Order ID</th>
+          <th>Supplier</th>
+          <th>Part</th>
+          <th>Qty</th>
+          <th>Amount</th>
+          <th>Order Date</th>
+          <th>Delivery Date</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for o in orders %}
+        <tr>
+          <td><strong>{{ o.id }}</strong></td>
+          <td>{{ o.supplier }}</td>
+          <td>{{ o.part }}</td>
+          <td>{{ o.quantity }}</td>
+          <td>{{ o.currency }} {{ "{:,.0f}".format(o.amount) }}</td>
+          <td>{{ o.order_date }}</td>
+          <td>{{ o.delivery_date }}</td>
+          <td><span class="badge status-{{ o.status_class }}">{{ o.status }}</span></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" style="text-align:center;padding:24px;color:var(--muted);">No orders found.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
