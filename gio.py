@@ -6,7 +6,7 @@ import threading
 import json
 import queue
 
-from server import GameServer, get_local_ip, DEFAULT_PORT
+from server import GameServer, WebSocketBridge, get_local_ip, DEFAULT_PORT
 
 # ──────────────── Settings ────────────────
 FPS = 60
@@ -348,6 +348,7 @@ def main():
                         try:
                             server_inst = GameServer()
                             threading.Thread(target=server_inst.run, daemon=True).start()
+                            WebSocketBridge(server_inst).run_in_thread()
                             time.sleep(0.4)
                             net.connect("127.0.0.1", DEFAULT_PORT, name_text.strip())
                         except Exception as e:

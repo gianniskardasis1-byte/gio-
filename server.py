@@ -9,6 +9,8 @@ import threading
 import json
 import random
 import time
+import asyncio
+import websockets
 
 WORDS = [
     "cat", "dog", "house", "tree", "sun", "moon", "car", "fish",
@@ -82,7 +84,7 @@ class GameServer:
 
     def _player_list(self):
         return [
-            {"id": pid, "name": p["name"], "score": p["score"]}
+            {"id": pid, "name": p["name"], "score": p["score"], "character": p["character"]}
             for pid, p in self.players.items()
         ]
 
@@ -151,7 +153,7 @@ class GameServer:
                     except (json.JSONDecodeError, ValueError):
                         continue
                     if msg.get("type") == "join" and pid is None:
-                        pid = self._add_player(client_socket, msg.get("name", "Player"))
+                        pid = self._add_player(client_socket, msg.get("name", "Player"), msg.get("character", "cat"))
                     elif pid is not None:
                         self._process(pid, msg)
         except Exception:
@@ -166,11 +168,14 @@ class GameServer:
 
     # ── player management ──
 
-    def _add_player(self, sock, name):
+    def _add_player(self, sock, name, character="cat"):
+        valid_chars = {"cat", "dog", "panda", "fox", "frog", "monkey"}
+        if character not in valid_chars:
+            character = "cat"
         with self.lock:
             pid = self.next_id
             self.next_id += 1
-            self.players[pid] = {"socket": sock, "name": name, "score": 0}
+            self.players[pid] = {"socket": sock, "name": name, "score": 0, "character": character}
             if self.host_id is None:
                 self.host_id = pid
 
@@ -181,7 +186,7 @@ class GameServer:
                 "players": self._player_list(),
                 "phase": self.phase,
             })
-            self._broadcast({"type": "player_joined", "id": pid, "name": name}, exclude=pid)
+            self._broadcast({"type": "player_joined", "id": pid, "name": name, "character": character}, exclude=pid)
             print(f"+ {name} (id={pid})")
             return pid
 
@@ -196,6 +201,8 @@ class GameServer:
             if pid == self.host_id and self.players:
                 self.host_id = next(iter(self.players))
                 self._send(self.players[self.host_id]["socket"], {"type": "you_are_host"})
+            elif pid == self.host_id:
+                self.host_id = None
 
             self._broadcast({"type": "player_left", "id": pid, "name": name})
 
@@ -251,7 +258,7 @@ class GameServer:
                         "scores": self._scores_dict(),
                     })
                     guessers = [p for p in self.players if p != self.drawer_id]
-                    if all(g in self.guessed_players for g in guessers):
+                    if guessers and all(g in self.guessed_players for g in guessers):
                         self._end_round("all_guessed")
                 else:
                     self._broadcast({
@@ -365,10 +372,81 @@ class GameServer:
         self._broadcast({"type": "game_over", "scores": self._scores_dict()})
 
 
+class WebSocketBridge:
+    """Bridges browser WebSocket clients to the TCP GameServer."""
+
+    def __init__(self, game_server, ws_host="0.0.0.0", ws_port=None):
+        self.game_server = game_server
+        self.ws_host = ws_host
+        self.ws_port = ws_port or (game_server.port + 1)
+
+    async def _handle_ws(self, websocket):
+        """Each WS client gets a TCP socket to the game server."""
+        tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            tcp.connect(("127.0.0.1", self.game_server.port))
+            tcp.setblocking(False)
+        except Exception:
+            await websocket.close()
+            return
+
+        loop = asyncio.get_event_loop()
+        stop = asyncio.Event()
+
+        async def tcp_to_ws():
+            buf = ""
+            while not stop.is_set():
+                try:
+                    data = await loop.sock_recv(tcp, 4096)
+                    if not data:
+                        break
+                    buf += data.decode()
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        line = line.strip()
+                        if line:
+                            await websocket.send(line)
+                except Exception:
+                    break
+            stop.set()
+
+        async def ws_to_tcp():
+            try:
+                async for raw in websocket:
+                    msg = raw.strip()
+                    if msg:
+                        await loop.sock_sendall(tcp, (msg + "\n").encode())
+            except Exception:
+                pass
+            stop.set()
+
+        await asyncio.gather(tcp_to_ws(), ws_to_tcp())
+        try:
+            tcp.close()
+        except Exception:
+            pass
+
+    def run_in_thread(self):
+        def _run():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            async def _start():
+                async with websockets.serve(self._handle_ws, self.ws_host, self.ws_port):
+                    print(f"WebSocket bridge listening on {self.ws_host}:{self.ws_port}")
+                    await asyncio.Future()  # run forever
+
+            loop.run_until_complete(_start())
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+
 if __name__ == "__main__":
     ip = get_local_ip()
     print(f"Your local IP: {ip}")
     srv = GameServer()
+    bridge = WebSocketBridge(srv)
+    bridge.run_in_thread()
     try:
         srv.run()
     except KeyboardInterrupt:
